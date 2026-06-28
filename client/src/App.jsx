@@ -31,7 +31,7 @@ function App() {
   const [status, setStatus] = useState("Loading portfolio builder...");
   const [health, setHealth] = useState({ api: "Checking API...", database: "Checking database..." });
   const [toast, setToast] = useState("");
-  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "", code: "" });
   const [authState, setAuthState] = useState(() => {
     const storedUser = window.localStorage.getItem("portfolio-user");
     const storedToken = window.localStorage.getItem("portfolio-token");
@@ -375,14 +375,18 @@ function App() {
   async function handleAuthSubmit(event) {
     event.preventDefault();
 
-    const endpoint = authMode === "signup" ? "/api/auth/register" : "/api/auth/login";
+    const endpoint =
+      authMode === "signup"
+        ? "/api/auth/register"
+        : authMode === "verify"
+          ? "/api/auth/verify-email"
+          : "/api/auth/login";
     const payload =
       authMode === "signup"
-        ? authForm
-        : {
-            email: authForm.email,
-            password: authForm.password,
-          };
+        ? { name: authForm.name, email: authForm.email, password: authForm.password }
+        : authMode === "verify"
+          ? { email: authForm.email, code: authForm.code }
+          : { email: authForm.email, password: authForm.password };
 
     try {
       const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -393,16 +397,47 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
+        if (data.verificationRequired) {
+          setAuthMode("verify");
+          setToast(data.message || "Verify your email before continuing.");
+          return;
+        }
+
         throw new Error(data.message || "Authentication failed");
       }
 
-      completeAuthentication(data.token, data.user, authMode === "signup" ? "Account created." : "Signed in.");
-    } catch (_error) {
-      completeAuthentication(
-        `local-demo-${Date.now()}`,
-        { name: authForm.name || "Portfolio User", email: authForm.email || "demo@example.com" },
-        "Demo login started. Backend is not required for this preview."
-      );
+      if (data.verificationRequired) {
+        setAuthMode("verify");
+        setAuthForm((current) => ({ ...current, email: data.email || current.email, code: data.devVerificationCode || "" }));
+        setToast(data.devVerificationCode ? `Dev verification code: ${data.devVerificationCode}` : data.message);
+        setStatus("Check your email for the verification code.");
+        return;
+      }
+
+      completeAuthentication(data.token, data.user, authMode === "verify" ? "Email verified." : "Signed in.");
+    } catch (error) {
+      setToast(error.message || "Authentication service is unavailable");
+      setStatus("Authentication failed. Check your details and try again.");
+    }
+  }
+
+  async function resendVerificationCode() {
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: authForm.email }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Could not resend code");
+      }
+
+      setAuthForm((current) => ({ ...current, code: data.devVerificationCode || current.code }));
+      setToast(data.devVerificationCode ? `Dev verification code: ${data.devVerificationCode}` : data.message);
+    } catch (error) {
+      setToast(error.message || "Could not resend code");
     }
   }
 
@@ -410,7 +445,7 @@ function App() {
     setAuthState({ token, user });
     window.localStorage.setItem("portfolio-token", token);
     window.localStorage.setItem("portfolio-user", JSON.stringify(user));
-    setAuthForm({ name: "", email: "", password: "" });
+    setAuthForm({ name: "", email: "", password: "", code: "" });
     setToast(message);
     changeScreen("information", "Information gathering active.");
   }
@@ -627,6 +662,9 @@ function App() {
             <button className={`tab-chip ${authMode === "signup" ? "active" : ""}`} type="button" onClick={() => setAuthMode("signup")}>
               Sign Up
             </button>
+            <button className={`tab-chip ${authMode === "verify" ? "active" : ""}`} type="button" onClick={() => setAuthMode("verify")}>
+              Verify
+            </button>
           </div>
 
           <form className="stack-form" onSubmit={handleAuthSubmit}>
@@ -640,13 +678,25 @@ function App() {
               Email
               <input type="email" required value={authForm.email} onChange={(event) => setAuthForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" />
             </label>
-            <label>
-              Password
-              <input type="password" required value={authForm.password} onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))} placeholder="Minimum 8 characters" />
-            </label>
+            {authMode === "verify" ? (
+              <label>
+                Verification code
+                <input inputMode="numeric" pattern="[0-9]{6}" required value={authForm.code} onChange={(event) => setAuthForm((current) => ({ ...current, code: event.target.value }))} placeholder="6-digit code" />
+              </label>
+            ) : (
+              <label>
+                Password
+                <input type="password" required value={authForm.password} onChange={(event) => setAuthForm((current) => ({ ...current, password: event.target.value }))} placeholder="Minimum 8 characters" />
+              </label>
+            )}
             <button className="button primary large-button" type="submit">
-              Continue to Information
+              {authMode === "verify" ? "Verify Email" : "Continue to Information"}
             </button>
+            {authMode === "verify" ? (
+              <button className="button ghost-button" type="button" onClick={resendVerificationCode}>
+                Resend Code
+              </button>
+            ) : null}
           </form>
 
           <button className="button ghost-button" type="button" onClick={() => changeScreen("landing")}>

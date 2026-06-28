@@ -13,14 +13,28 @@ const app = express();
 const port = process.env.PORT || 5000;
 const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/portfolio_builder";
 const authSecret = process.env.AUTH_SECRET || "dev-secret-change-me";
+const tokenTtlMs = Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12);
+const verificationTtlMinutes = Number(process.env.EMAIL_VERIFICATION_TTL_MINUTES || 15);
+const emailDeliveryMode = process.env.EMAIL_DELIVERY_MODE || "console";
+const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const authAttempts = new Map();
 
 app.use(
   cors({
-    origin: true,
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("CORS origin is not allowed"));
+    },
     credentials: true,
   })
 );
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 function base64UrlEncode(value) {
   return Buffer.from(value)
@@ -52,6 +66,79 @@ function verifyPassword(password, passwordHash) {
   return crypto.timingSafeEqual(Buffer.from(storedHash, "hex"), Buffer.from(derivedHash, "hex"));
 }
 
+function normalizeEmail(email = "") {
+  return String(email).trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
+function validatePassword(password = "") {
+  if (password.length < 8) {
+    return "Password must be at least 8 characters";
+  }
+
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+    return "Password must include at least one letter and one number";
+  }
+
+  return "";
+}
+
+function createVerificationCode() {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function hashVerificationCode(code) {
+  return crypto.createHash("sha256").update(`${authSecret}:${code}`).digest("hex");
+}
+
+function verifyCode(code, codeHash) {
+  if (!code || !codeHash) {
+    return false;
+  }
+
+  const expected = hashVerificationCode(String(code).trim());
+  return crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(codeHash, "hex"));
+}
+
+async function setEmailVerification(user) {
+  const code = createVerificationCode();
+  user.emailVerificationCodeHash = hashVerificationCode(code);
+  user.emailVerificationExpiresAt = new Date(Date.now() + verificationTtlMinutes * 60 * 1000);
+  user.emailVerified = false;
+  user.status = "pending_verification";
+  await user.save();
+  await sendVerificationEmail(user, code);
+  return code;
+}
+
+async function sendVerificationEmail(user, code) {
+  if (emailDeliveryMode === "console") {
+    console.log(`[email-verification] ${user.email}: ${code}`);
+    return { status: "console", code };
+  }
+
+  // Connect SMTP or an email provider here for production delivery.
+  console.log(`[email-verification] delivery skipped for ${user.email}; EMAIL_DELIVERY_MODE=${emailDeliveryMode}`);
+  return { status: "not_configured" };
+}
+
+function checkRateLimit(key, limit = 8, windowMs = 15 * 60 * 1000) {
+  const now = Date.now();
+  const entry = authAttempts.get(key) || { count: 0, resetAt: now + windowMs };
+
+  if (entry.resetAt < now) {
+    entry.count = 0;
+    entry.resetAt = now + windowMs;
+  }
+
+  entry.count += 1;
+  authAttempts.set(key, entry);
+  return entry.count <= limit;
+}
+
 function createToken(payload) {
   const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const body = base64UrlEncode(JSON.stringify(payload));
@@ -67,7 +154,7 @@ function createToken(payload) {
 }
 
 function verifyToken(token) {
-  const [header, body, signature] = token.split(".");
+  const [header, body, signature] = String(token || "").split(".");
   if (!header || !body || !signature) {
     return null;
   }
@@ -85,7 +172,11 @@ function verifyToken(token) {
   }
 
   try {
-    return JSON.parse(base64UrlDecode(body));
+    const payload = JSON.parse(base64UrlDecode(body));
+    if (!payload.issuedAt || Date.now() - payload.issuedAt > tokenTtlMs) {
+      return null;
+    }
+    return payload;
   } catch (_error) {
     return null;
   }
@@ -98,6 +189,8 @@ function sanitizeUser(user) {
     email: user.email,
     role: user.role,
     provider: user.provider,
+    status: user.status,
+    emailVerified: user.emailVerified,
     onboardingComplete: user.onboardingComplete,
   };
 }
@@ -122,6 +215,10 @@ async function requireAuth(request, response, next) {
   const user = await User.findById(payload.userId);
   if (!user) {
     return response.status(401).json({ message: "User not found" });
+  }
+
+  if (user.status !== "active" || !user.emailVerified) {
+    return response.status(403).json({ message: "Email verification is required" });
   }
 
   request.user = user;
@@ -278,25 +375,77 @@ app.post("/api/portfolio", async (request, response) => {
 app.post("/api/auth/register", async (request, response) => {
   try {
     const { name, email, password } = request.body;
+    const normalizedEmail = normalizeEmail(email);
+    const passwordError = validatePassword(password || "");
 
-    if (!name || !email || !password || password.length < 8) {
-      return response.status(400).json({ message: "Name, email, and a password with at least 8 characters are required" });
+    if (!String(name || "").trim()) {
+      return response.status(400).json({ message: "Full name is required" });
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
+    if (!isValidEmail(normalizedEmail)) {
+      return response.status(400).json({ message: "Enter a valid email address" });
+    }
+
+    if (passwordError) {
+      return response.status(400).json({ message: passwordError });
+    }
+
     const existing = await User.findOne({ email: normalizedEmail });
-    if (existing) {
+    if (existing?.emailVerified) {
       return response.status(409).json({ message: "An account with this email already exists" });
     }
 
-    const user = await User.create({
-      name: name.trim(),
-      email: normalizedEmail,
-      passwordHash: createPasswordHash(password),
-      provider: "local",
-      onboardingComplete: false,
-    });
+    const user = existing || new User({ email: normalizedEmail, provider: "local" });
+    user.name = name.trim();
+    user.passwordHash = createPasswordHash(password);
+    user.onboardingComplete = false;
+    const verificationCode = await setEmailVerification(user);
 
+    return response.status(existing ? 200 : 201).json({
+      message: "Verification code sent. Confirm your email before logging in.",
+      verificationRequired: true,
+      email: user.email,
+      devVerificationCode: emailDeliveryMode === "console" ? verificationCode : undefined,
+      user: sanitizeUser(user),
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return response.status(409).json({ message: "An account with this email already exists" });
+    }
+
+    return response.status(500).json({ message: "Failed to register user" });
+  }
+});
+
+app.post("/api/auth/verify-email", async (request, response) => {
+  try {
+    const normalizedEmail = normalizeEmail(request.body.email);
+    const code = String(request.body.code || "").trim();
+
+    if (!isValidEmail(normalizedEmail) || !/^\d{6}$/.test(code)) {
+      return response.status(400).json({ message: "A valid email and 6-digit code are required" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return response.status(404).json({ message: "No pending account found for this email" });
+    }
+
+    if (!user.emailVerificationExpiresAt || user.emailVerificationExpiresAt < new Date()) {
+      return response.status(410).json({ message: "Verification code expired. Request a new code." });
+    }
+
+    if (!verifyCode(code, user.emailVerificationCodeHash)) {
+      return response.status(400).json({ message: "Invalid verification code" });
+    }
+
+    user.emailVerified = true;
+    user.emailVerifiedAt = new Date();
+    user.emailVerificationCodeHash = "";
+    user.emailVerificationExpiresAt = null;
+    user.status = "active";
+    user.lastLoginAt = new Date();
+    await user.save();
     await ensureUserWorkspace(user);
 
     const token = createToken({
@@ -306,24 +455,70 @@ app.post("/api/auth/register", async (request, response) => {
       issuedAt: Date.now(),
     });
 
-    return response.status(201).json({
-      message: "Account created. Welcome email integration placeholder triggered.",
-      welcomeEmailStatus: "placeholder_sent",
+    return response.json({
+      message: "Email verified. You are signed in.",
       token,
       user: sanitizeUser(user),
     });
   } catch (error) {
-    return response.status(500).json({ message: "Failed to register user" });
+    return response.status(500).json({ message: "Failed to verify email" });
+  }
+});
+
+app.post("/api/auth/resend-verification", async (request, response) => {
+  try {
+    const normalizedEmail = normalizeEmail(request.body.email);
+
+    if (!isValidEmail(normalizedEmail)) {
+      return response.status(400).json({ message: "Enter a valid email address" });
+    }
+
+    if (!checkRateLimit(`resend:${normalizedEmail}`, 3, 15 * 60 * 1000)) {
+      return response.status(429).json({ message: "Too many verification requests. Try again later." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return response.status(404).json({ message: "No account found for this email" });
+    }
+
+    if (user.emailVerified) {
+      return response.status(409).json({ message: "This email is already verified" });
+    }
+
+    const verificationCode = await setEmailVerification(user);
+    return response.json({
+      message: "Verification code sent again.",
+      verificationRequired: true,
+      email: user.email,
+      devVerificationCode: emailDeliveryMode === "console" ? verificationCode : undefined,
+    });
+  } catch (error) {
+    return response.status(500).json({ message: "Failed to resend verification code" });
   }
 });
 
 app.post("/api/auth/login", async (request, response) => {
   try {
-    const { email, password } = request.body;
-    const user = await User.findOne({ email: email?.toLowerCase().trim() });
+    const { password } = request.body;
+    const normalizedEmail = normalizeEmail(request.body.email);
+
+    if (!checkRateLimit(`login:${normalizedEmail || request.ip}`)) {
+      return response.status(429).json({ message: "Too many login attempts. Try again later." });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
 
     if (!user || !verifyPassword(password || "", user.passwordHash)) {
       return response.status(401).json({ message: "Invalid email or password" });
+    }
+
+    if (!user.emailVerified || user.status !== "active") {
+      return response.status(403).json({
+        message: "Verify your email before logging in",
+        verificationRequired: true,
+        email: user.email,
+      });
     }
 
     user.lastLoginAt = new Date();
@@ -418,6 +613,10 @@ app.post("/api/contact", async (request, response) => {
 
   if (!name || !email || !message) {
     return response.status(400).json({ message: "Name, email, and message are required" });
+  }
+
+  if (!isValidEmail(normalizeEmail(email))) {
+    return response.status(400).json({ message: "Enter a valid email address" });
   }
 
   return response.status(201).json({

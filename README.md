@@ -13,7 +13,7 @@ A Docker-ready React + Express + MongoDB portfolio platform for Sher Singh with:
 - contact form and success toast
 - certifications and testimonials
 - placeholder admin panel
-- real user model foundation with register/login APIs and user-scoped saved workspace
+- verified email signup/login APIs and user-scoped saved workspace
 
 ## Stack
 
@@ -37,6 +37,8 @@ The backend now exposes:
 - `POST /api/ai/job-match`
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/verify-email`
+- `POST /api/auth/resend-verification`
 - `GET /api/auth/me`
 - `GET /api/user/portfolio`
 - `PUT /api/user/portfolio`
@@ -60,7 +62,11 @@ Example:
 ```bash
 MONGO_URI=mongodb://127.0.0.1:27017/portfolio_builder
 PORT=5000
-AUTH_SECRET=change-this-secret
+AUTH_SECRET=replace-with-a-long-random-secret
+AUTH_TOKEN_TTL_MS=43200000
+EMAIL_VERIFICATION_TTL_MINUTES=15
+EMAIL_DELIVERY_MODE=console
+CORS_ORIGINS=http://localhost:5173,https://sher-singh-1.github.io
 ```
 
 ### 3. Start the apps
@@ -102,6 +108,16 @@ The Docker client container uses:
 - local manual mode -> `http://localhost:5000`
 - Docker mode -> `http://server:5000`
 
+## GitHub Pages and backend hosting
+
+GitHub Pages can host only the static React frontend. It cannot run the Express API or MongoDB. For real login, verified email, and saved portfolio data, deploy the backend and MongoDB separately, then build the frontend with:
+
+```bash
+VITE_API_BASE=https://your-backend-domain.example npm --prefix client run build
+```
+
+The GitHub Pages workflow should use the same `VITE_API_BASE` value after the backend is live.
+
 ## Helper scripts
 
 ```bash
@@ -130,8 +146,10 @@ cd /home/shersingh/automation
 Current auth notes:
 
 - password auth is real on the backend
+- users must verify a 6-digit email code before login
+- `EMAIL_DELIVERY_MODE=console` logs/returns the code for local testing
+- production needs SMTP or an email provider connected inside `sendVerificationEmail`
 - Google login is not implemented yet
-- welcome email is a placeholder response point, ready for a mail provider integration
 
 ## Verification
 
