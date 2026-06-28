@@ -148,6 +148,25 @@ Value: https://portfolio-builder-api.example.com
 
 Re-run the GitHub Pages action. The GitHub Pages site will remain the visible project link, while login, email verification, and saved portfolio data will use the live backend.
 
+### No-card backend option: Vercel
+
+If Render asks for payment details, deploy the backend on Vercel instead:
+
+1. Import the GitHub repo into Vercel.
+2. Set the project root directory to `server`.
+3. Add environment variables:
+
+```bash
+MONGO_URI=mongodb+srv://.../portfolio_builder?retryWrites=true&w=majority
+AUTH_SECRET=long-random-secret
+EMAIL_DELIVERY_MODE=console
+CORS_ORIGINS=https://sher-singh-1.github.io
+```
+
+4. Deploy.
+5. Open `/api/health` on the Vercel backend URL.
+6. Add the Vercel backend URL as the GitHub Actions variable `VITE_API_BASE`, then rerun the GitHub Pages workflow.
+
 ## GitHub Pages and backend hosting
 
 GitHub Pages can host only the static React frontend. It cannot run the Express API or MongoDB. For real login, verified email, and saved portfolio data, deploy the backend and MongoDB separately, then build the frontend with:

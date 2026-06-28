@@ -40,6 +40,32 @@ app.use(
 );
 app.use(express.json({ limit: "1mb" }));
 
+let databaseConnectionPromise = null;
+
+export async function connectDatabase() {
+  if (mongoose.connection.readyState === 1) {
+    return mongoose.connection;
+  }
+
+  if (!databaseConnectionPromise) {
+    databaseConnectionPromise = mongoose.connect(mongoUri).then(async (connection) => {
+      await ensurePublicPortfolio();
+      return connection;
+    });
+  }
+
+  return databaseConnectionPromise;
+}
+
+app.use(async (_request, response, next) => {
+  try {
+    await connectDatabase();
+    return next();
+  } catch (error) {
+    return response.status(503).json({ message: "Database connection unavailable" });
+  }
+});
+
 function base64UrlEncode(value) {
   return Buffer.from(value)
     .toString("base64")
@@ -717,8 +743,7 @@ app.delete("/api/admin/:collection/:id", async (request, response) => {
 
 async function startServer() {
   try {
-    await mongoose.connect(mongoUri);
-    await ensurePublicPortfolio();
+    await connectDatabase();
     app.listen(port, () => {
       console.log(`Server running on http://localhost:${port}`);
     });
@@ -728,4 +753,8 @@ async function startServer() {
   }
 }
 
-startServer();
+if (process.env.VERCEL !== "1") {
+  startServer();
+}
+
+export default app;
