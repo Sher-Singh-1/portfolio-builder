@@ -1,0 +1,3 @@
+http://portfolio.localhost {
+  reverse_proxy client:5173
+}
