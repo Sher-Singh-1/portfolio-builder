@@ -108,6 +108,46 @@ The Docker client container uses:
 - local manual mode -> `http://localhost:5000`
 - Docker mode -> `http://server:5000`
 
+## Production deployment flow
+
+The public project URL should stay on GitHub Pages:
+
+```text
+https://sher-singh-1.github.io/portfolio-builder/
+```
+
+The backend must run on a backend host because GitHub Pages cannot run Express or MongoDB. This repo includes `render.yaml` for deploying `server/` as a Node web service. Use a hosted MongoDB connection string, such as MongoDB Atlas, for `MONGO_URI`.
+
+Production backend environment variables:
+
+```bash
+MONGO_URI=mongodb+srv://...
+AUTH_SECRET=long-random-secret
+EMAIL_DELIVERY_MODE=smtp
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-smtp-user
+SMTP_PASS=your-smtp-password
+SMTP_FROM=Portfolio Builder <no-reply@example.com>
+CORS_ORIGINS=https://sher-singh-1.github.io
+```
+
+After the backend is deployed, copy its public URL, for example:
+
+```text
+https://portfolio-builder-api.example.com
+```
+
+Then open the GitHub repo settings and add an Actions variable:
+
+```text
+Name: VITE_API_BASE
+Value: https://portfolio-builder-api.example.com
+```
+
+Re-run the GitHub Pages action. The GitHub Pages site will remain the visible project link, while login, email verification, and saved portfolio data will use the live backend.
+
 ## GitHub Pages and backend hosting
 
 GitHub Pages can host only the static React frontend. It cannot run the Express API or MongoDB. For real login, verified email, and saved portfolio data, deploy the backend and MongoDB separately, then build the frontend with:
@@ -148,7 +188,7 @@ Current auth notes:
 - password auth is real on the backend
 - users must verify a 6-digit email code before login
 - `EMAIL_DELIVERY_MODE=console` logs/returns the code for local testing
-- production needs SMTP or an email provider connected inside `sendVerificationEmail`
+- production sends verification codes through SMTP when `EMAIL_DELIVERY_MODE=smtp`
 - Google login is not implemented yet
 
 ## Verification

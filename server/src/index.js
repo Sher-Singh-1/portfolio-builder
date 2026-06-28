@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import mongoose from "mongoose";
+import nodemailer from "nodemailer";
 import Portfolio from "./models/Portfolio.js";
 import User from "./models/User.js";
 import { cloneSiteContent, sampleSiteContent } from "./data/sampleSite.js";
@@ -16,6 +17,9 @@ const authSecret = process.env.AUTH_SECRET || "dev-secret-change-me";
 const tokenTtlMs = Number(process.env.AUTH_TOKEN_TTL_MS || 1000 * 60 * 60 * 12);
 const verificationTtlMinutes = Number(process.env.EMAIL_VERIFICATION_TTL_MINUTES || 15);
 const emailDeliveryMode = process.env.EMAIL_DELIVERY_MODE || "console";
+const smtpPort = Number(process.env.SMTP_PORT || 587);
+const smtpSecure = process.env.SMTP_SECURE === "true";
+const smtpFrom = process.env.SMTP_FROM || process.env.SMTP_USER || "Portfolio Builder <no-reply@example.com>";
 const allowedOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())
@@ -120,9 +124,35 @@ async function sendVerificationEmail(user, code) {
     return { status: "console", code };
   }
 
-  // Connect SMTP or an email provider here for production delivery.
-  console.log(`[email-verification] delivery skipped for ${user.email}; EMAIL_DELIVERY_MODE=${emailDeliveryMode}`);
-  return { status: "not_configured" };
+  if (emailDeliveryMode !== "smtp") {
+    throw new Error(`Unsupported EMAIL_DELIVERY_MODE: ${emailDeliveryMode}`);
+  }
+
+  const required = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"];
+  const missing = required.filter((key) => !process.env[key]);
+  if (missing.length) {
+    throw new Error(`Missing SMTP configuration: ${missing.join(", ")}`);
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: smtpPort,
+    secure: smtpSecure,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+
+  await transporter.sendMail({
+    from: smtpFrom,
+    to: user.email,
+    subject: "Verify your Portfolio Builder email",
+    text: `Your Portfolio Builder verification code is ${code}. It expires in ${verificationTtlMinutes} minutes.`,
+    html: `<p>Your Portfolio Builder verification code is <strong>${code}</strong>.</p><p>It expires in ${verificationTtlMinutes} minutes.</p>`,
+  });
+
+  return { status: "sent" };
 }
 
 function checkRateLimit(key, limit = 8, windowMs = 15 * 60 * 1000) {
