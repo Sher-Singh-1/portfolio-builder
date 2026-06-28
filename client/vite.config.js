@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 const proxyTarget = process.env.VITE_PROXY_TARGET || "http://localhost:5000";
 
 export default defineConfig({
+  base: process.env.NODE_ENV === "production" ? "/portfolio-builder/" : "/",
   plugins: [react()],
   server: {
     host: "0.0.0.0",
